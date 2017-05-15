@@ -1,0 +1,40 @@
+
+- Solid & Actor System
+– Basic player movement (idle, run, variable jump height, wall jump/slide)
+	https://twitter.com/mattthorson/status/649726329655459840
+- Player forgiving jumps
+- Basic animation
+– Gamepad support
+– Pixel perfect collision support (tilemap & solids)
+- Ladders
+- One way platforms (Jump through platforms)
+– Slope functionality
+– Push/pull blocks
+– Moving platforms (horizontal + vertical) (actor carrying & squishing)
+– Springs
+– Conveyor belts
+– Ice and surfaces with varying friction values
+– Switches that trigger events
+– Doors connecting rooms
+– Room edges that connect rooms
+– Camera follows target (scrolling threshold)
+– Camera screenshake
+– Spikes, lava, quicksand, and other hazards
+– Player death with room fade-in/out
+– Sprite skewing and procedural animation example(s)
+– Basic transition and particle example(s)
+- Ropes
+
+===============================================
+
+- Edge grab
+- Duck & crawl
+- Collectables
+- Elevators
+- Explosives
+- Damage
+- Enemies
+- Hazards
+- Inventory
+- Box activated plates
+- Sprint / Run

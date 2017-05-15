@@ -1,0 +1,1444 @@
+pico-8 cartridge // http://www.pico-8.com
+version 8
+__lua__
+--little platform
+--@judelco
+
+-- todo: tileset rework
+-- todo: movimiento lateral en el aire/tierra (remove "sliding"/"inertia")
+-- todo: ajustar constantes fisicas
+-- bug: saltar desde la escalera a veces falla
+-- todo: separar animacion/sprite de la logica (post fsm update)
+
+-- todo: animation fsm
+--    self:addanimation("name", { 1, 2, 3}, 5, oncomplete)
+--    self:play("name") -- call it each frame, internal counter applies
+-- todo: add particles system
+
+--------------------------------
+-- game content
+--------------------------------
+
+pad = {
+	left = 0,
+	right = 1,
+	up = 2,
+	down = 3,
+	z = 4,
+	x = 5,
+}
+
+sound = {
+	jump = 0,
+}
+
+music = {
+}
+
+--------------------------------
+-- game flow
+--------------------------------
+
+function _init()
+	p1 = make_player(20, 230, 10, 12)
+	cam = make_camera(p1)
+
+	--make_m_platform(268, 256, 268, 217, 16, 4, 90, 0)
+
+	--make_m_platform(226, 153, 216, 153, 16, 4, 90, 30)
+	--make_m_platform(196, 153, 196, 168, 16, 4, 90, 0)
+
+	--make_m_platform(160, 153, 70, 153, 16, 4, 90, 0)
+	
+	--for i = 0, 32, 1 do
+	--	make_m_platform((i*16), 120, (i*16 + 50), 90, 16, 4, 60, i * 8)
+	--end
+	
+	for i = 10, 20, 1 do
+		make_cloud(rnd(350), rnd(230))
+	end
+end
+
+tick = 0
+
+function _update60()
+	p1:update()
+
+	tick += 1
+	if tick % 40 == 0 then
+		make_cloud(-30, 0 + rnd(230))
+	end
+
+	for p in all(m_platforms) do
+		p:update()
+	end
+	
+	for c in all(clouds) do
+		c:update()
+	end
+	
+	cam:update()
+end
+
+function _draw()
+	cls(7)
+
+	local bx = lerp(-30, 0, 1 - ((cam.x - 13) / 315))
+	local by = -70 + lerp(100, 0, 1 - (cam.y / 242))
+
+	camera(-bx * 10, by * 0.4)
+	
+	for c in all(clouds) do
+		c:draw()
+	end
+	
+	camera(cam.x - 64, cam.y - 64)
+
+	map(42, 0, bx, by, 60, 32)
+	map(0, 0, 0, 0, 60, 32)
+
+	p1:draw()
+
+	for solid in all(solids) do
+		solid:draw(1)
+	end
+
+	---------------------
+	camera()
+
+	color(1)
+	--print("state: "..p1.fsm.state_current)
+	--print("stime: "..p1.fsm.state_timer)
+	--print("x: "..p1.x)
+	--print("y: "..p1.y)
+	--print("vx: "..p1.vx)
+	--print("vy: "..p1.vy)
+end
+
+--------------------------------
+-- clouds
+--------------------------------
+
+clouds = {}
+
+function make_cloud(x, y)
+	local c = {}
+	c.x = x
+	c.y = y
+	c.speed = 0.1 + rnd(0.3)
+	c.circles = {}
+	
+	for i = 0, (rnd(4) + 4), 1 do
+		local circle = {}
+		circle.x = rnd(40) - 20
+		circle.y = rnd(10) - 5
+		circle.r = rnd(10) + 5
+
+		add(c.circles, circle)
+	end
+	
+	c.update = function(self)
+		c.x += c.speed
+		
+		if c.x > 400 then
+			del(clouds, self)
+		end
+	end
+	
+	c.draw = function(self)
+		for circle in all(self.circles) do
+			circfill(self.x + circle.x, self.y + circle.y, circle.r, 6)
+		end
+		
+		for circle in all(self.circles) do
+			circfill(self.x + circle.x - 1, self.y + circle.y - 1, circle.r - 2, 7)
+		end
+	end
+	
+	add(clouds, c)
+end
+
+--------------------------------
+-- moving platform
+--------------------------------
+
+m_platforms = {}
+
+function make_m_platform(x1, y1, x2, y2, w, h, duration, offset)
+	local p = solid.new(x1, y1, w, h)
+
+	p.x1 = x1
+	p.y1 = y1
+	p.x2 = x2
+	p.y2 = y2
+
+	p.duration = duration
+	p.counter = offset
+	p.sign = 1
+
+	if offset > 0 then
+		local d = p.counter / p.duration
+		p.x = round((x1 * (1 - d)) + (x2 * d))
+		p.y = round((y1 * (1 - d)) + (y2 * d))
+	end
+
+	p.update = function(self)
+		local d = self.counter / self.duration
+		local x = round((self.x1 * (1 - d)) + (self.x2 * d))
+		local y = round((self.y1 * (1 - d)) + (self.y2 * d))
+
+		self.counter += self.sign
+		
+		if (self.sign < 0 and self.counter <= 0) or (self.sign > 0 and self.counter >= self.duration) then
+			self.sign *= -1
+		end
+
+		self:move(x - (self.x + self.x_remainder), y - (self.y + self.y_remainder))
+	end
+
+	add(m_platforms, p)
+
+	return p
+end
+
+--------------------------------
+-- camera
+--------------------------------
+
+function make_camera(target)
+	local c = {}
+
+	c.target = target
+	c.x = target.x + -25
+	c.y = target.y
+	c.accel_x = 0
+	c.accel_y = 0
+
+	c.pull_threshold = 12.5
+	c.pos_min = { x = 64, y = 0 }
+	c.pos_max = { x = 264, y = 192 }
+
+	c.update = function(self)
+		self.accel_x = approach(self.accel_x, (self.x - self.target.x) * (0.5 / c.pull_threshold), 0.2)
+		self.x = approach(self.x, self.target.x, abs(self.accel_x) + 0.01)
+		self.x -= self.accel_x
+
+		self.accel_y = approach(self.accel_y, (self.y - self.target.y) * (0.5 / c.pull_threshold), 0.2)
+		self.y = approach(self.y, self.target.y, abs(self.accel_y) + 0.01)
+		self.y -= self.accel_y
+
+		self.x = mid(self.pos_min.x, self.x, self.pos_max.x)
+		self.y = mid(self.pos_min.y, self.y, self.pos_max.y)
+	end
+
+	return c
+end
+
+--------------------------------
+-- player
+--------------------------------
+
+function make_player(x, y, w, h)
+	local p = actor.new(x, y, w, h)
+
+	-- physics constants
+	
+	p.vx_max = 1
+	p.vx_acc = 0.1
+	p.vx_fric = 0.08
+	p.vx_air_acc = 0.1
+	p.vx_air_fric = 0.01
+
+	p.vy_max = 1.8
+	p.vy_grav = 0.1
+	p.wall_vy_max = 0.5
+	p.wall_vy_grav = 0.01
+	p.wall_stick_time = 7
+
+	p.jump_speed = 2.8
+	p.jump_forgiving_time = 10
+
+	p.ladder_speed = 1
+	p.ladder_acc = 0.1
+	
+	-- internal variables
+
+	p.vx = 0
+	p.vy = 0
+	p.old_vx = 0
+	p.old_vy = 0
+
+	p.can_jump = false
+	p.jump_btn_pressed = false
+	p.jump_btn_held = false
+	p.jump_btn_hold_time = 0
+	p.jump_btn_released = false
+
+	p.wall_sticking = false
+	p.wall_sticking_time = 0
+
+	p.sprite = 1
+	p.flipx = false
+
+	p.fsm = fsm.new()
+	
+	p.fsm:add_state("walk", function(tick)
+		if btn(pad.left) then
+			if p.vx > 0 then
+				p.vx = approach(p.vx, 0, p.vx_fric)
+			else
+				p.vx = approach(p.vx, -p.vx_max, p.vx_acc)
+			end
+		elseif btn(pad.right) then
+			if p.vx < 0 then
+				p.vx = approach(p.vx, 0, p.vx_fric)
+			else
+				p.vx = approach(p.vx, p.vx_max, p.vx_acc)
+			end
+		else
+			p.vx = approach(p.vx, 0, p.vx_fric)
+		end
+		
+		if p.jump_btn_held and (p.jump_btn_hold_time < p.jump_forgiving_time) then
+			p.fsm:switch_state("jump")
+		end
+		
+		if not p:is_grounded() then
+			p.fsm:switch_state("fall")
+		end
+		
+		if btn(pad.up) and p:is_on_ladder() then
+			p.fsm:switch_state("ladder")
+		end
+		
+		p:move_horizontal(function()
+			p.vx = 0
+			p.x_remainder = 0
+		end)
+
+		if abs(p.vx) < 0.4 then
+			p.sprite = 0
+		else
+			p.sprite = (flr(tick / 7) % 2 * 2)
+		end
+		
+		p.can_jump = true
+	end)
+
+	p.fsm:add_state("fall", function(tick)
+		-- reset wall cling
+		if not p:collides_left() and not p:collides_right() then
+			p.wall_sticking = false
+			p.wall_sticking_time = 0
+		end
+		
+		-- cling to wall
+		if ((btn(pad.right) and p:collides_left()) or (btn(pad.left) and p:collides_right())) and not p.wall_sticking then
+			p.wall_sticking = true
+		elseif p.wall_sticking then
+			p.wall_sticking_time += 1
+			
+			if p.wall_sticking_time > p.wall_stick_time then
+				p.wall_sticking = false
+			end
+		end
+		
+		-- move left/right
+		if btn(pad.left) and not p.wall_sticking then
+			p.vx = approach(p.vx, -p.vx_max, p.vx_air_acc)
+		elseif btn(pad.right) and not p.wall_sticking then
+			p.vx = approach(p.vx, p.vx_max, p.vx_air_acc)
+		else
+			p.vx = approach(p.vx, 0, p.vx_air_fric)
+		end
+		
+		-- forgiving jump or land
+		local is_valid_jump = p.can_jump and (p.jump_btn_hold_time < p.jump_forgiving_time)
+		
+		if p:is_grounded() and not (p.jump_btn_held and is_valid_jump) then
+			p.vy = 0
+			p.fsm:switch_state("walk")
+		end
+		
+		if p:is_grounded() or p:is_on_ladder() then
+			if is_valid_jump and p.jump_btn_held then
+				p.vy = -p.jump_speed
+				p.can_jump = false
+				sfx(sound.jump)
+			end
+		end
+		
+		-- wall jump left
+		if p.jump_btn_pressed and p:collides_left() and not p:is_grounded() then
+			if btn(pad.left) then
+				p.vy = -p.jump_speed * 1
+				p.vx = 1
+			else
+				p.vy = -p.jump_speed * 1
+				p.vx =  p.vx_max;
+			end
+
+			p.can_jump = false
+			sfx(sound.jump)
+		end
+
+		-- wall jump right
+		if p.jump_btn_pressed and p:collides_right() and not p:is_grounded() then
+			if btn(pad.right) then
+				p.vy = -p.jump_speed * 1
+				p.vx = -1.8
+			else
+				p.vy = -p.jump_speed * 1
+				p.vx = -p.vx_max * 1.5;
+			end
+
+			p.can_jump = false
+			sfx(sound.jump)
+		end
+		
+		-- apply gravity (or wall slide gravity)
+		if (p:collides_left() and (btn(pad.left) or p.wall_sticking)) or (p:collides_right() and (btn(pad.right) or p.wall_sticking)) then
+			if p.vy > p.wall_vy_max then
+				p.vy = approach(p.vy, p.wall_vy_max, p.wall_vy_grav * 10)
+			else
+				p.vy = approach(p.vy, p.wall_vy_max, p.wall_vy_grav)
+			end
+		else
+			p.vy = approach(p.vy, p.vy_max, p.vy_grav)
+		end
+
+		p:move_horizontal(function()
+			p.vx = 0
+			p.x_remainder = 0
+		end)
+
+		p:move_vertical(function()
+			p.vy = 0
+			p.y_remainder = 0
+		end)
+		
+		if p.vy < 0 then
+			p.fsm:switch_state("jump")
+		end
+		
+		if (btn(pad.up) or btn(pad.down)) and p:is_on_ladder() and not btn(pad.x) then
+			p.fsm:switch_state("ladder")
+		end
+		
+		if p.wall_sticking or (p:collides_left() or p:collides_right()) then
+			p.sprite = 12
+		else
+			p.sprite = 6
+		end
+	end)
+
+	p.fsm:add_state("jump", function(tick)
+		-- reset wall cling
+		if not p:collides_left() and not p:collides_right() then
+			p.wall_sticking = false
+			p.wall_sticking_time = 0
+		end
+
+		-- cling to wall
+		if ((btn(pad.right) and p:collides_left()) or (btn(pad.left) and p:collides_right())) and not p.wall_sticking then
+			p.wall_sticking = true
+		elseif p.wall_sticking then
+			p.wall_sticking_time += 1
+			
+			if p.wall_sticking_time > p.wall_stick_time then
+				p.wall_sticking = false
+			end
+		end
+		
+		-- move left/right
+		if btn(pad.left) and not p.wall_sticking then
+			p.vx = approach(p.vx, -p.vx_max, p.vx_air_acc)
+		elseif btn(pad.right) and not p.wall_sticking then
+			p.vx = approach(p.vx, p.vx_max, p.vx_air_acc)
+		else
+			p.vx = approach(p.vx, 0, p.vx_air_fric)
+		end
+
+		-- jump, stop jumping or land
+		local is_valid_jump = p.can_jump and (p.jump_btn_hold_time < p.jump_forgiving_time)
+		
+		if p:is_grounded() and not (p.jump_btn_held and is_valid_jump) then
+			p.vy = 0
+			p.fsm:switch_state("walk")
+		end
+		
+		if p:is_grounded() then
+			if is_valid_jump and p.jump_btn_held then
+				p.vy = -p.jump_speed
+				p.can_jump = false
+				sfx(sound.jump)
+			end
+		elseif p.jump_btn_released and p.vy < 0 then
+			p.vy *= 0.25
+		end
+		
+		-- apply gravity
+		p.vy = approach(p.vy, p.vy_max, p.vy_grav)
+
+		p:move_horizontal(function()
+			p.vx = 0
+			p.x_remainder = 0
+		end)
+
+		p:move_vertical(function()
+			p.vy = 0
+			p.y_remainder = 0
+		end)
+		
+		if p.vy >= 0 then
+			p.fsm:switch_state("fall")
+		end
+		
+		if (btn(pad.up) or btn(pad.down)) and p:is_on_ladder() and not btn(pad.x) then
+			p.fsm:switch_state("ladder")
+		end
+		
+		p.sprite = 4
+	end)
+	
+	p.fsm:add_state("ladder", function(tick)
+		if p:is_on_ladder() then
+			p.vx = approach(p.x, (flr(p.x / 8) * 8) + 4, 0.4) - p.x
+		end
+		
+		if btn(pad.up) then
+			p.vy = approach(p.vy, -p.ladder_speed, p.ladder_acc)
+		elseif btn(pad.down) then
+			p.vy = approach(p.vy, p.ladder_speed, p.ladder_acc)
+		else
+			p.vy = approach(p.vy, 0, p.ladder_acc)
+		end
+		
+		p:move_horizontal(function()
+			p.vx = 0
+			p.x_remainder = 0
+		end)
+
+		p:move_vertical(function()
+			if p.vy > 0 then -- floor collision
+				p.fsm:switch_state("walk")
+				p.vy = 0
+			end
+		end)
+		
+		if p.jump_btn_held and (p.jump_btn_hold_time < p.jump_forgiving_time) then
+			p.fsm:switch_state("jump")
+			
+			if btn(pad.left) then
+				p.vx = -p.vx_max
+			elseif btn(pad.right) then
+				p.vx = p.vx_max
+			end
+		end
+		
+		if not p:is_on_ladder() then
+			p.fsm:switch_state("fall")
+		end
+
+		if btn(pad.up) or btn(pad.down) then
+			p.sprite = 8 + (flr(tick / 7) % 2 * 2) -- todo: 8, 10
+		end
+		
+		p.can_jump = true
+	end)
+	
+	p.fsm:init("walk")
+
+	p.update = function(self)
+		-- velocity verlet
+		self.old_vx = self.vx
+		self.old_vy = self.vy
+
+		if btn(pad.x) then
+			if not p.jump_btn_pressed and not p.jump_btn_held then
+				p.jump_btn_pressed = true
+				p.jump_btn_held = true
+			else
+				p.jump_btn_pressed = false
+			end
+			
+			p.jump_btn_hold_time += 1
+		else
+			p.jump_btn_hold_time = 0
+		end
+		
+		if p.jump_btn_released then
+			p.jump_btn_released = false
+		elseif p.jump_btn_held and not btn(pad.x) then
+			p.jump_btn_released = true
+			p.jump_btn_held = false
+			p.jump_btn_pressed = false
+		end
+
+		self.fsm:update()
+		
+		if self.vx < 0 then
+			p.flipx = true
+		elseif self.vx > 0 then
+			p.flipx = false
+		end
+	end
+	
+	p.move_horizontal = function(self, on_collide)
+		self:move_x((self.old_vx + self.vx) * 0.5, on_collide)
+	end
+	
+	p.move_vertical = function(self, on_collide)
+		self:move_y((self.old_vy + self.vy) * 0.5, on_collide)
+	end
+
+	p.draw = function(self)
+		local spr_x = flr(((self.w - 1) / 8) + 1)
+		local spr_y = flr(((self.h - 1) / 8) + 1)
+
+		spr(self.sprite,
+			self.x - (spr_x * 8 / 2),
+			self.y - ((spr_y * 8) - (self.h / 2) - (self.h % 2)),
+			spr_x,
+			spr_y,
+			self.flipx,
+			false
+		)
+	end
+
+	p.is_riding = function(self, solid)
+		if solid.collidable and overlaps(
+			solid.x, solid.y, solid.w, solid.h,
+			self.x, self.y + 1, self.w, self.h
+		) then
+			return true
+		end
+
+		return false
+	end
+	
+	p.is_on_ladder = function(self)
+		return fget(mget(self.x / 8, (self.y + 1) / 8), 2)
+	end
+	
+	p.collides_left = function(self)
+		return self:collides(-1, 0)
+	end
+	
+	p.collides_right = function(self)
+		return self:collides(1, 0)
+	end
+
+	p.is_grounded = function(self)
+		-- todo: spatial hashing
+		for solid in all(solids) do
+			if self:is_riding(solid) then
+				return true
+			end
+		end
+
+		return self:collides(0, 1)
+	end
+
+	return p
+end
+
+--------------------------------
+-- physics
+--------------------------------
+
+actors = {}
+solids = {}
+
+object =
+{
+	x = 0,
+	y = 0,
+	x_remainder = 0,
+	y_remainder = 0,
+	w = 2,
+	h = 2,
+	half_w = 1,
+	half_h = 1,
+
+	left = function(self)
+		return self.x - flr(self.half_w)
+	end,
+
+	right = function(self)
+		return self.x + flr(self.half_w) - ((self.w + 1) % 2)
+	end,
+
+	top = function(self)
+		return self.y - flr(self.half_h)
+	end,
+
+	bottom = function(self)
+		return self.y + flr(self.half_h) - ((self.h + 1) % 2)
+	end,
+
+	draw = function(self, color)
+		rectfill(self:left(), self:top(), self:right(), self:bottom(), color)
+	end,
+}
+
+actor =
+{
+	new = function(x, y, w, h)
+		local a =
+		{
+			x = x,
+			y = y,
+			w = w,
+			h = h,
+			half_w = w / 2,
+			half_h = h / 2,
+		}
+
+		setmetatable(a, {
+			__index = function(t, k)
+				local v = nil
+				if object[k] != nil then
+					v = object[k]
+				elseif actor[k] != nil then
+					v = actor[k]
+				end
+				return v
+			end
+		})
+
+		add(actors, a)
+
+		return a
+	end,
+
+	move_x = function(self, amount, on_collide)
+		self.x_remainder += amount
+		local move = round(self.x_remainder)
+
+		if move != 0 then
+			self.x_remainder -= move
+			local sign = sgn(move)
+
+			while move != 0 do
+				if not self:collides(sign , 0) then
+					self.x += sign
+				else
+					if on_collide != nil then
+						on_collide()
+					end
+
+					break
+				end
+				
+				move -= sign
+			end
+		end
+	end,
+
+	move_y = function(self, amount, on_collide)
+		self.y_remainder += amount
+		local move = round(self.y_remainder)
+
+		if move != 0 then
+			self.y_remainder -= move
+			local sign = sgn(move)
+
+			while move != 0 do
+				if not self:collides(0, sign) then
+					self.y += sign
+				else
+					if on_collide != nil then
+						on_collide()
+					end
+
+					break
+				end
+				
+				move -= sign
+			end
+		end
+	end,
+
+	is_riding = function(self, solid) -- virtual
+	end,
+
+	squish = function(self) -- virtual
+	end,
+
+	collides = function(self, add_x, add_y)
+		-- todo: spatial hashing
+		for solid in all(solids) do
+			if solid.collidable and overlaps(
+				(self.x + add_x), (self.y + add_y), self.w, self.h,
+				solid.x, solid.y, solid.w, solid.h
+			) then
+				return true
+			end
+		end
+
+		if  fget(mget((add_x + self:left()) / 8,  (add_y + self:top()) / 8), 0) or
+			fget(mget((add_x + self.x) / 8,       (add_y + self:top()) / 8), 0) or
+			fget(mget((add_x + self:right()) / 8, (add_y + self:top()) / 8), 0) or
+			fget(mget((add_x + self:left()) / 8,  (add_y + self.y) / 8), 0) or
+			fget(mget((add_x + self:right()) / 8, (add_y + self.y) / 8), 0) or
+			fget(mget((add_x + self:left()) / 8,  (add_y + self:bottom()) / 8), 0) or
+			fget(mget((add_x + self.x) / 8,       (add_y + self:bottom()) / 8), 0) or
+			fget(mget((add_x + self:right()) / 8, (add_y + self:bottom()) / 8), 0) then
+			return true
+		end
+		
+		if add_y > 0 then
+			if  fget(mget((add_x + self.x) / 8, (add_y + self:bottom()) / 8), 1) and not
+				fget(mget((add_x + self.x) / 8, (add_y + self:bottom() - 1) / 8), 1) then
+				return true
+			end
+		end
+
+		return false
+	end,
+
+	destroy = function(self)
+		del(actors, self)
+	end,
+}
+
+solid =
+{
+	collidable = true,
+
+	new = function(x, y, w, h)
+		local s =
+		{
+			x = x,
+			y = y,
+			w = w,
+			h = h,
+			half_w = w / 2,
+			half_h = h / 2,
+		}
+
+		setmetatable(s, {
+			__index = function(t, k)
+				local v = nil
+				if object[k] != nil then
+					v = object[k]
+				elseif solid[k] != nil then
+					v = solid[k]
+				end
+				return v
+			end
+		})
+
+		add(solids, s)
+
+		return s
+	end,
+
+	move = function(self, amount_x, amount_y)
+		self.x_remainder += amount_x
+		self.y_remainder += amount_y
+		local move_x = round(self.x_remainder)
+		local move_y = round(self.y_remainder)
+
+		if move_x != 0 or move_y != 0 then
+			local riding = self:get_riding_actors()
+			self.collidable = false
+
+			if move_x != 0 then
+				self.x_remainder -= move_x
+				self.x += move_x
+
+				-- todo: spatial hashing
+				for actor in all(actors) do
+					if obj_overlaps(self, actor) then
+						local distance = self:right() - actor:left()
+						if move_x < 0 then
+							distance = self:left() - actor:right()
+						end
+
+						actor:move_x(distance + sgn(move_x), function() actor:squish() end)
+					else
+						for r in all(riding) do
+							if r == actor then
+								actor:move_x(move_x, nil)
+								break
+							end
+						end
+					end
+				end
+			end
+
+			if move_y != 0 then
+				self.y_remainder -= move_y
+				self.y += move_y
+
+				-- todo: spatial hashing
+				for actor in all(actors) do
+					if obj_overlaps(self, actor) then
+						local distance = self:bottom() - actor:top()
+						if move_y < 0 then
+							distance = self:top() - actor:bottom()
+						end
+
+						actor:move_y(distance + sgn(move_y), function() actor:squish() end)
+					else
+						for r in all(riding) do
+							if r == actor then
+								actor:move_y(move_y, nil)
+								break
+							end
+						end
+					end
+				end
+			end
+
+			self.collidable = true
+		end
+	end,
+
+	get_riding_actors = function(self)
+		local riding = {}
+
+		-- todo: spatial hashing
+		for actor in all(actors) do
+			if actor:is_riding(self) then
+				add(riding, actor)
+			end
+		end
+
+		return riding
+	end,
+
+	destroy = function(self)
+		del(solids, self)
+	end,
+}
+
+--------------------------------
+-- fsm
+--------------------------------
+
+fsm =
+{
+	new = function()
+		local f =
+		{
+			state_current = "",
+			state_next = state_current,
+			state_timer = 0,
+			state_list = {},
+			state_stack = {},
+		}
+		
+		setmetatable(f, { __index = fsm })
+
+		return f
+	end,
+	
+	add_state = function(self, state_name, script)
+		self.state_list[state_name] = script
+	end,
+	
+	init = function(self, state_name)
+		self.state_current = state_name
+		self.state_next = state_name
+		self.state_stack[0] = state_name
+	end,
+	
+	switch_state = function(self, state_name, push)
+		self.state_next = state_name
+
+		if push == true then
+			self.state_stack[count(self.state_stack)] = self.state_next
+		end
+	end,
+	
+	switch_previous_state = function(self)
+		del(self.state_stack, count(self.state_stack) - 1)
+		self:switch_state(self.state_stack[count(self.state_stack) - 1], false)
+	end,
+	
+	update = function(self)
+		self.state_list[self.state_current](self.state_timer)
+		
+		if self.state_next != self.state_current then
+			self.state_current = self.state_next
+			self.state_timer = 0
+		else
+			self.state_timer += 1
+		end
+	end,
+}
+
+--------------------------------
+-- math & util
+--------------------------------
+
+function approach(a, b, amount)
+	if a < b then
+		return min(a + amount, b)
+	else
+    	return max(a - amount, b)
+	end
+end
+
+function lerp(a, b, percent)
+	return a + percent * (b - a)
+end
+
+function overlaps(x1, y1, w1, h1, x2, y2, w2, h2)
+	local x_distance = x1 - x2
+	local x_size = (w1 + w2) * 0.5
+
+	if abs(x_distance) >= x_size then
+		return false
+	end
+
+	local y_distance = y1 - y2
+	local y_size = (h1 + h2) * 0.5
+
+	if abs(y_distance) >= y_size then
+		return false
+	end
+
+	return true
+end
+
+function obj_overlaps(obj_a, obj_b)
+	return overlaps(
+		obj_a.x, obj_a.y, obj_a.w, obj_a.h,
+		obj_b.x, obj_b.y, obj_b.w, obj_b.h
+	)
+end
+
+function round(value)
+	return flr(value + 0.5)
+end
+
+__gfx__
+00000000011000000000000000000000000000000110000000000000011000000000000001100000000001100000000000000110000000000000000000000000
+000000011dd100000000000001100000000000011dd10000000000011dd10000000000011dd1000000001dd11000000000001dd1100000000000000000000000
+0000001dddd10000000000011dd100000000001dddd100000000001dddd100000000001dddd1000000001dddd100000000001dddd10000000000000000000000
+000001ddddd100000000001dddd10000000001ddddd10000000001ddddd10000000001ddddd1000000001ddddd10000000001ddddd1000000000000000000000
+00001dd676710000000001ddddd1000000001dd67671000000001dd67671000000001dddddd1000000001dddddd10000000017676dd100000000000000000000
+00001d661611000000001dd67671000000001d661611000000001d661611000000001dddddd1100000011dddddd100000000116166d110000000000000000000
+000016666661000000001d661611000000001666666100000001166666611000000016dddd616100001616dddd61000000001666666161000000000000000000
+00001666776100000000166666610000000016667761010000161666776161000000166666616100001616666661000000001677666161000000000000000000
+0001dd1661dd100000001666776100000011dd1661dd16100016dd1661dd61000001dd1661dd61000016dd1661dd10000001dd1661dd61000000000000000000
+00016dd11dd610000001dd1661dd10000166ddd11ddd66100016ddd11ddd61000016ddd11ddd10000001ddd11ddd61000016ddd11ddd61000000000000000000
+00016dddddd6100000016dd11dd6100001611dddddd1110000011dddddd1100000161dddddd1000000001dddddd1610001611dddddd110000000000000000000
+00016dddddd6100000016dddddd610000010177777710000000017777771000000161dddddd1000000001dddddd1610000101dddddd100000000000000000000
+000167777776100000016dddddd61000000017711771000000001771177100000001177777710000000017777771100000001777777100000000000000000000
+00001771177100000000177777710000000011611161000000000161116110000000177117710000000017711771000000001771177100000000000000000000
+0000016116100000000017711771000000001d101d1000000000001d101d1000000001611d100000000001d11610000000000161011610000000000000000000
+000001d11d10000000001d1001d1000000001110111000000000001110111000000001d101000000000000101d1000000000001d1001d1000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+01111111111111111111111001111111111111111111111000000000000000000000000000000000000000000000000001111111111111111111111000000000
+11dddddddddddddddddddd1111dddddddddddddddddddd1100000000000000000000000000000000000000000000000011dddddddddddddddddddd1100000000
+1dd666666666666666666dd11dddddddddddddddddddddd10000000000000000000000000000000000000000000000001dddddddddddddddddddddd100000000
+1d66666666666666666666d11ddddd1dd1d1d1d1d1ddddd10000000000000000000000000000000000000000000000001ddd6666666666666666ddd100000000
+1d66666666666666666666d11ddd111111d111d11111ddd10000777777777777777700000000000000000000000000001dd666666666666666666dd100000000
+1d66666666666666666666d11dd111111111111111111dd10000766666666666666700000000777777770000000000001dd666666666666666666dd100000000
+1d66666666666666666666d11dd111111111111111111dd10000766666666666666700000007111111117000000000001dd666666666666666666dd100000000
+1d66666666666666666666d11d11111111111111111111d100007666666666666667000000717666616d1700000000001dd666666666666666666dd100000000
+1d66666666666666666666d11d11111111111111111111d10000766666666666666700000717dddd17d6d170000000001dd666666666666666666dd100000000
+1d66666666666666666666d11d11111111111111111111d10000766666666666666700000716ddd61dddd170000000001dd666666666666666666dd100000000
+1d66666666666666666666d11d11111111111111111111d1000076666666666666670000071111111d66d170000000001dd666666666666666666dd100000000
+1d66666666666666666666d11d11111111111111111111d1000076666666666666670000071dd1dd1dddd170000000001dd666666666666666666dd100000000
+1d66666666666666666666d11d11111111111111111111d1000076666666666666670000071d666d1d66d170000000001dd666666666666666666dd100000000
+1d66666666666666666666d11d11111111111111111111d1000076666666666666670000071ddddd1dddd170000000001dd666666666666666666dd100000000
+1d66666666666666666666d11d11111111111111111111d1000076666666666666670000071d666d1d66d170000000001dd666666666666666666dd100000000
+1d66666666666666666666d11d11111111111111111111d1000076666666666666670000071ddddd1dddd170000000001dd666666666666666666dd100000000
+1d66666666666666666666d11d11111111111111111111d17777777700000000777777770000000000000000000000001dd666666666666666666dd100000000
+1d66666666666666666666d11d11111111111111111111d17777777700000000777777770000000000000000000000001dd666666666666666666dd100000000
+1d66666666666666666666d11d11111111111111111111d17777777700000000777777770000000000000000000000001dd666666666666666666dd100000000
+1d66666666666666666666d11dd111111111111111111dd17777777700000000777777770000000000000000000000001dd666666666666666666dd100000000
+1d66666666666666666666d11dd111111111111111111dd17777777700000000777777770000000000000000000000001ddd6666666666666666ddd100000000
+1dd66666666666666666ddd11ddd1111111111111111ddd17777777700000000777777770000000000000000000000001dddddddddddddddddddddd100000000
+11dddddddddddddddddddd1111dddddddddddddddddddd1177777777000000007777777700000000000000000000000011dddddddddddddddddddd1100000000
+01111111111111111111111001111111111111111111111077777777000000007777777700000000000000000000000001111111111111111111111000000000
+666666666666666666666666111111111111111111111111000007770007767007777000000000000000000000000000000000001d670000111111110111ddd0
+6777777666666666667767661dddddd11dd1111111dd1d110000076700776670776677770000000000000000000000000000000000000000dddddddd010000d0
+6766667666666666667766661d1111d11dd1d11111dd11110000076707766770766667670000000000000000000000000000000000000000111111110111ddd0
+6766667666676766666666761d1111d111111111111111d1000777670766767777667767000000000000000000000000000000000000000000000000010000d0
+6766667666666666677676661d1111d111d1d1111dd1d1117777676777776667776676670000000000000000000000000000000000000000000000000111ddd0
+6766667666676776677666661d1111d1111111111dd11111666666666666666666666666000000000000000000000000000000000000000000000000010000d0
+6777777666666776666677661dddddd1111111111111dd116666666666666666666666660000000000000000000000000000000000000000000000000111ddd0
+666666666666666666666666111111111111111111111111666666666666666666666666000000000000000000000000000000000000000000000000010000d0
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+__label__
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000007770770070700000000077707770077077700770000077707000777077707770077077707770777077700000000000000000000000
+00000000000000000000007070707070700000000077700700700070707070000070707000707007007000707070707770700070700000000000000000000000
+00000000000000000000007770707070700000000070700700700077007070000077707000777007007700707077007070770077000000000000000000000000
+00000000000000000000007070707077700000000070700700700070707070000070007000707007007000707070707070700070700000000000000000000000
+00000000000000000000007070777007000700000070707770077070707700000070007770707007007000770070707070777070700000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00dd1500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00d11150000000000000000000000000000000000000000000000000000000000000000000000000000000000001100000000000000000000000000000000000
+00dd1500000000505000005050000050500000505000005050000050500000505000005050000050500000505001100000000050500000505000005050000050
+00d11150500505151005051510050515100505151005051510050515100505151005051510050515100505151000000000050515100505151005051510050515
+00dd1115155151111551511115515111155151111551511115515111155151111551511115515111155151111500000100515111155151111551511115515111
+00d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d100000000d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1
+00dd1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d001000001d1d1d1d1d1d1d1d1d1d1d1d1d1d1d
+000ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd00000000dddddddddddddddddddddddddddddd
+005005005000000000000000000000000000000000000000000000000050050050000000000000000050050050d1d50000000051dd0000000000000000000051
+005506000000000000000000000000000000000000000000000000000055060000000000000000000055060000dd11500000511d1d000001000000900000511d
+006055000000000000000000000000000000000000000000000000000060550000000000000000000060550000d1d50000000511dd000000000009a900000511
+006005000000000000000000000000000000000000000000000000000060050000000000000000000060050000dd11500000511d1d00000000000a7a0000511d
+000006000000000000000000000000000000000000000000000000000000060000000000000000000000060000d1d11500000511dd000000000009f900000511
+000006000000000000000000000000000000000000000000000000000000060000000000000000000000060000dd11500000005d1d000000000001400000005d
+000006000000000000000000000000000000000000000000000000000000060000000000000000000000060000d1d11500000511dd0000001000014000000511
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000dd15000000005d1d000000000000100000005d
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d1d50000000051dd0000000000000000000051
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000dd11500000511d1d011000000000000000511d
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d1d50000000511dd0110000000000000000511
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000dd11500000511d1d000000000000000000511d
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d1d11500000511dd0000010000000000000511
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000dd11500000005d1d000000000000000000005d
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d1d11500000511dd0010000000000000000511
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000dd15000000005d1d000000000000000000005d
+100110011001100110000000000000000000000000000000000000000000000000000000000000000000000000d1d50000000051dd0000000000000000000051
+f11ff11ff11ff11ff1000000000000000000000000000000000000000000000000000000000000000000000000dd11500000511d1d000000000000900000511d
+944994499449944994000000000000000000000000000000000000000000000000000000000000000000000000d1d50000000511dd000000000009a900000511
+100110011001100110000000000000000000000000000000000000000000000000000000000000000000000000dd11500000511d1d00000000000a7a0000511d
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d1d11500000511dd000000000009f900000511
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000dd11500000005d1d000000000001400000005d
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d1d11500000511dd0000000000014000000511
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000dd15000000005d1d000000000000100000005d
+d0d111000000000000000000000000000001100110000000000110011000000000011001100000000001100110d1d50000000051dd0000000000000000000051
+d0ddd101000000000000000000000000001ff11ff1000000001ff11ff1000000001ff11ff1000000001ff11ff1dd11500000511d1d000001000000000000511d
+d0dddd011000000000000000000000000049944994000000004994499400000000499449940000000049944994d1d50000000511dd0000000000000000000511
+090000000000000000000000000000000001100110000000000110011000000000011001100000000001100110dd11500000511d1d000000000000000000511d
+9a9d0ddd1000000000000000000000000000000000000000000000000000000000000000000000000000000000d1d11500000511dd0000000000000000000511
+aaa90dd11000000000000000000000000000000000000000000000000000000000000000000000000000000000dd11500000005d1d000000000000000000005d
+a7a90dd11100000000000000000000000000000000000000000000000000000000000000000000000000000000d1d11500000511dd0000001000000000000511
+a7a000000000000000000000000000000000000000000000000000000000000000000000000000000000000000dd15000000005d1d000000000000000000005d
+fff0dd0d1100000000000000000000000000000000000000000000000000000000000000000000000000000000d1d50000000051dd0000000000000000000051
+4f40dd0d1100000000000000000000000000000000000000000000000000000000000000000000000000000000dd11500000511d1d011000000000900000511d
+4440dd011000000000000000000000000000000000000000000000000000000000000000000000000000000000d1d50000000511dd011000000009a900000511
+044000000000000000000000000000000000000000000000000000000000000000000000000000000000000000dd11500000511d1d00000000000a7a0000511d
+004011110000000000000000000000000000000000000000000000000000000000000000000000000000000000d1d11500000511dd000001000009f900000511
+100011100000000000000000000000000000000000000051110000000000000000000000000000000000000000dd11500000005d1d000000000001400000005d
+111000000000000000000000000000000000000000000061711000000000000000000000000033500000000000d1d11500000511dd0010000000014000000511
+000000000000000000000000000000000000000000000627871700000000000000000000000355530000000000dd15000000005d1d000000000000100000005d
+00000000000000000000000000000000000000000000005771600000000dddddddddddddddddddddd000000000d1d50000000051dd0000000000000000000051
+0000000000000000000000000000000000000000000000066600000000dd1d1d1dd1d1d1d1d1d1d1dd00000000dd11500000511d1d000000000000000000051d
+0000000000000000000000000000000000000000000000059900000000d1d111111d1d1d1d1d1d1d1d00000000d1d50000000511dd0000505000005050000051
+0000000000000000000000000000000000000000000000055000000000dd11151551111515515111dd00000000dd11500000511d1d050515100505151005051d
+0000000000000000000000000000000000000000000000440000000000d1d15050015150500505111d00000000d1d11500000511dd5151111551511115515111
+0000000000000000000000000000000000000000000000000000000000dd15000005050000000051dd00000000dd11500000005d1dd1d1d1d1d1d1d1d111111d
+0000500000000000000000000000000000000000000000000000000000d1d15000000000000005111d00000000d1d11500000511dd1d1d1d1d1d1d1d1dd1d1d1
+0005500500000000000000000000000000000000000000000000000000dd15000000000000000051dd00000000dd15000000005d1ddddddddddddddddddddddd
+ddddddddd0000000000000000000000000000000000000000000000000d1d5000000000000000051dd00000000d1d50000000051dd5005005000000000000000
+1dd1d1d1dd000000000000000000000000000000000000000000000000dd1150000110000000511d1d00000000dd11500000511d1d5506000000000000000000
+111d1d1d1d000000000000000000000000000000000000000000000000d1d5000001100000000511dd00000000d1d50000000511dd6055000000000000000000
+15515111dd000000000000000000000000000000000000000000000000dd1150000000000000511d1d00000000dd11500000511d1d6005000000000000000000
+500505111d000000000000000000000000000000000000000000000000d1d1150000000100000511dd00000000d1d11500000511dd0006000000000000000000
+00000051dd000000000000000000000000000000000000000000000000dd1150000000000000005d1d00000000dd11500000005d1d0006000000000000000000
+000005111d000000000000000000000000000000000000000000000000d1d1150000100000000511dd00000000d1d11500000511dd0006000000000000000000
+00000051dd000000000000000000000000000000000000000000000000dd1500000000000000005d1d00000000dd15000000005d1d0000000000000000000000
+00000051dd000000000000000000000000000011d0d111000000000000d1d5000000000000000051dd01100110d1d50000000051dd0000000000000000000000
+0000051d1d0000000000000000000000000011ddd0ddd1010000000000dd1150000000010000511d1d1ff11ff1dd11500000511d1d0000000000000000000000
+00000051dd000000000000000000000000001dddd0dddd011000000000d1d5000000000000000511dd49944994d1d50000000511dd0000000000000000000000
+5005051d1d000000000000000000000000000000090000000000000000dd1150000000000000511d1d01100110dd11500000511d1d0000000000000000000000
+15515111dd00000000000000000000000011dd0d9a9d0ddd1000000000d1d1150000000000000511dd00000000d1d11500000511dd0000000000000000000000
+d111111d1d00000000000000000000000011dd09aaa90dd11000000000dd1150000000000000005d1d00000000dd11500000005d1d0000000000000000000000
+1dd1d1d1dd00000000000000000000000011dd09a7a90dd11100000000d1d1150000000010000511dd00000000d1d11500000511dd0000000000000000000000
+ddddddddd0000000000000000000000000000000a7a000000000000000dd1500000000000000005d1d00000000dd15000000005d1d0000000000000000000000
+0000000000000000000000000000000000011dd0fff0dd0d1100000000d1d5000000000000000051dd00000000d1d50000000051ddddddddd000000000000000
+0000000000000000000000000000000000011dd04f40dd0d1100000000dd1150000110000000511d1d00000000dd11500000511d1dd1d1d1dd00000000000000
+00000000000000000000000000000000000011d04440dd011000000000d1d5000001100000000511dd00000000d1d50000000511dd1d1d1d1d00000000000000
+0000000000000000000000000000000000000000044000000000000000dd1150000000000000511d1d00000000dd11500000511d1d515111dd00000000000000
+0000000000000000000000000000000000001101004011110000000000d1d1150000000100000511dd00000000d1d11500000511dd0505111d00000000000000
+0000000000000000000000000000000000000101100011100000000000dd1150000000000000005d1d00000000dd11500000005d1d000051dd00000000000000
+0000000000000000000000000000000000000001111000000000000000d1d1150000100000000511dd00000000d1d11500000511dd0005111d00000000000000
+0000000000000000000000000000000000000000000000000000000000dd1500000000000000005d1d00000000dd15000000005d1d000051dd00000000000000
+0000000000000000000000000000000000000000000000000000000000d1d5000000000000000051dd00000000d1d50000000051dd00000000ddddddd0000000
+0000000000000000000000000000000000000000000000000000000000dd1150000000010000511d1d00000000dd11500000511d1d01100000d1d1d1dd000000
+0000000000000000000000000000000000000000000000000000000000d1d5000000000000000511dd00000000d1d50000000511dd011000001d1d1d1d000000
+0000000000000000000000000000000000000000000000000000000000dd1150000000000000511d1d00000000dd11500000511d1d00000000515111dd000000
+0000000000000000000000000000000000000000000000000000000000d1d1150000000000000511dd00000000d1d11500000511dd000001000505111d000000
+0000000000000000000000000000000000000000000000000000000000dd1150000000000000005d1d00000000dd11500000005d1d00000000000051dd000000
+0000000000000000000000000000000000003350000050000000000000d1d1150000000010000511dd00000000d1d11500000511dd001000000005111d000000
+0000000000000000000000000000000000035553000550050000000000dd1500000000000000005d1d00000000dd15000000005d1d00000000000051dd000000
+000000000000000000000000000dddddddddddddddddddddd000000000d1d5000000000000000051dd00000000d1d50000000051dd0000000000000000dddddd
+00000000000000000000000000dd1d1d1dd1d1d1d1d1d1d1dd00000000dd1150000110000000511d1d00000000dd11500000511d1d0000000000000100d1d1d1
+00000000000000000000000000d1d111111d1d1d1d1d1d1d1d00000000d1d5000001100000000511dd00000000d1d50000000511dd00000000000000001d1d1d
+00000000000000000000000000dd11151551111515515111dd00000000dd1150000000000000511d1d00000000dd11500000511d1d0000000000000000515111
+00000000000000000000055500d1d15050015150500505111d00000000d1d1150000000100000511dd00000000d1d11500000511dd0000000000000000050511
+00000000000000000000555550dd15000005050000000051dd00000000dd1150000000000000005d1d00000000dd11500000005d1d0000000000000000000051
+00000000000000000000050550d1d15000000000000005111d00000000d1d1150000100000000511dd00000000d1d11500000511dd0000000000000010000511
+00000000000000000000555500dd15000000000000000051dd00000000dd1500000000000000005d1d00000000dd15000000005d1d0000000000000000000051
+0000000000000000000ddddddd0000000000000000000051dd00000000dd15000000000000000051dd01100110d1d50000000051dd0000000000000000000000
+000000000000000000dd1d1d1d000001000000010000511d1d00000000d11150000000000000051d1d1ff11ff1dd11500000511d1d0000000000000000011000
+000000000000000000d1d111110000000000000000000511dd00000000dd15000000005050000051dd49944994d1d50000000511dd0000000000000000011000
+000000000000000000dd111515000000000000000000511d1d00000000d11150500505151005051d1d01100110dd11500000511d1d0000000000000000000000
+000000000000000000d1d150500000000000000000000511dd00000000dd11151551511115515111dd00000000d1d11500000511dd0000000000000000000001
+000000000000000000dd150000000000000000000000005d1d00000000d1d1d1d1d1d1d1d111111d1d00000000dd11500000005d1d0000000000000000000000
+000000000000335000d1d150000000001000000010000511dd00000000dd1d1d1d1d1d1d1dd1d1d1dd00000000d1d11500000511dd0000000000000000001000
+000000000003555300dd150000000000000000000000005d1d000000000dddddddddddddddddddddd000000000dd15000000005d1d0000000000000000000000
+00000000000ddddddd000000000000000000000000000051dd0000000000000000500500500000000000000000d1d50000000051dd0000000000000000000000
+0000000000dd1d1d1d01100000000000000110000000511d1d0000000000000000550600000000000000000000dd11500000511d1d0110000000000000000000
+0000000000d1d11111011000000000000001100000000511dd0000000000000000605500000000000000000000d1d50000000511dd0110000000000000000000
+0000000000dd11151500000000000000000000000000511d1d0000000000000000600500000000000000000000dd11500000511d1d0000000000000000000000
+0000000000d1d15050000001000000000000000100000511dd0000000000000000000600000000000000000000d1d11500000511dd0000010000000000000000
+0000000000dd15000000000000000000000000000000005d1d0000000000000000000600000000000000000000dd11500000005d1d0000000000000000000000
+0000500000d1d15000001000000000000000100000000511dd0000000000335000000600000000000000335000d1d11500000511dd0010000000000000000000
+0005500500dd15000000000000000000000000000000005d1d0000000003555300000000000000000003555300dd15000000005d1d0000000000000000000000
+ddddddddddd1d50000000000000000000000000000000051dddddddddddddddddddddddddddddddddddddddddddddddddd00000000dddddddddddddddddddddd
+d1d1d1d1d1dd11500000000000000001000000010000511d1dd1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d100000000d1d1d1d1d1d1d1d1d1d1d1
+1d1d1d1d1dd1d50000000000000000000000000000000511dd1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d000000001d1d1d1d1d1d1d1d1d1d1d
+1551111515dd11500000000000000000000000000000511d1d511115155111151551111515511115155111151551111515000000005111151551111515511115
+5001515050d1d11500000000000000000000000000000511dd015150500151505001515050015150500151505001515050000000000151505001515050015150
+0005050000dd11500000000000000000000000000000005d1d050500000505000005050000050500000505000005050000000000000505000005050000050500
+0000000000d1d11500000000000000001000000010000511dd000000000000000000000000000000000000000000000000000000000000000000000000000000
+0000000000dd15000000000000000000000000000000005d1d000000000000000000000000000000000000000000000000000000000000000000000000000000
+
+__gff__
+0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001010101010100000000000001010100010101010101000000010100010101000101010101010000000000000101010001010101010100000000000000000204
+0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+__map__
+4141414142000000000000000000000000000000000000000000000000000000000000004041414141006767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767000000000000000000000000000000000000000000000000000000
+5161616162000000000000000000000000000000000000000000000000000000000000006061616151006767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767000000000000000000000000000000000000000000000000000000
+5200000000000000000000000000000000000000000000000000000000000000000000000000000050006767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767000000000000000000000000000000000000000000000000000000
+5200000000000000004041414200000000000000000000000000000000000000000000000000000050006767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767000000000000000000000000000000000000000000000000000000
+5200000000000000005051715200000000000000000000000000000000494a00000000000000000050006767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767000000000000000000000000000000000000000000000000000000
+5200000000000000005051515200000000000000000000000000000000595a00000000000000000050006767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767000000000000000000000000000000000000000000000000000000
+5200000000000000005051705200000000004041414141414141414141414142000000000000000050006767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767000000000000000000000000000000000000000000000000000000
+5200000000000000005051515200000000005051725151705151517151517252000000000000000050006767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767000000000000000000000000000000000000000000000000000000
+5200000000000000005072515200000000005070517151515172515170515152000000000000000050006767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767000000000000000000000000000000000000000000000000000000
+5200000000000000005070515200000000005051516161616161616161616162000000000000000050006767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767000000000000000000000000000000000000000000000000000000
+5200000000000000005051715200000000005051520000000000000000000000000000000000000050006767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767000000000000000000000000000000000000000000000000000000
+5200000000000000005051515200000000005071520000000000000000000000000000000000000050006767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767000000000000000000000000000000000000000000000000000000
+5200000000000000005051705200000000006061620000000000000000000000000000000000000050006767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767000000000000000000000000000000000000000000000000000000
+5200000000000000005071515200000000000000000000000000000000000000000000000000000050006767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767000000000000000000000000000000000000000000000000000000
+5200000000000000005051515200000000000000000000000000000000000000000000000000000050006767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767000000000000000000000000000000000000000000000000000000
+5200000000000000005051725200000000000000000000000000000000000000000000000000000050006767676767676767676767676776477778676767676767676767677847676767676767676767676767676767676767676767676767764767676767000000000000000000000000000000000000000000000000000000
+5200000000000000006061616200000000000000000000000000000000000000000000000000000050006767676767676767676767676757575757676767676767676767675757676767676767676767676767676767676767677647676767575767676767000000000000000000000000000000000000000000000000000000
+5200000000000000000000000000000000000000000000000000000000000000000000000000000050006767676767676767676767676757575757676747776767676767765757476767676767676767676767676767676767675757676767575767676767000000000000000000000000000000000000000000000000000000
+52000000000000000000000000000000000040414141414141414141427e7e7f7f4041414141414151006767676767677678676767676757575757676757576767676777575757576767676767674778674747676767676767675757776778575767676767000000000000000000000000000000000000000000000000000000
+520000000000000000000000000000000000507051517151705151725200007f7f5071517251705151006767676767675757676767676757575757676757576767676757575757576767477778765757675757676767676767675757576757575767676767000000000000000000000000000000000000000000000000000000
+520000000000000000000000000000000000606161616161616161616200007f7f6061616151715151006767676767675757676767477657575757677657576747786757575757576767575757575757675757766747477867675757576757575767767767000000000000000000000000000000000000000000000000000000
+520000000000000000000000000000000000000000000000000000000000007f7f0000000050515151006777764767675757476778575757575757675757576757576757575757576767575757575757675757574757575767765757576757575767575767000000000000000000000000000000000000000000000000000000
+520000000000000000000000000000000000000000000000000000000000007f7f0000000050705151006757575767675757576757575757575757675757576757576757575757576767575757575757675757575757575767575757576757575767575767000000000000000000000000000000000000000000000000000000
+520000000000000000000000000000000000000000000000000000000000007f7f0000000050515151007857575767675757576757575757575757675757576757576757575757576767575757575757675757575757575767575757576757575767575747000000000000000000000000000000000000000000000000000000
+520000000000000000000000000000000000000000000000000000000000007f7f0000000050517251005757575767675757576757575757575757675757577657576757575757576767575757575757675757575757575767575757576757575767575757000000000000000000000000000000000000000000000000000000
+520000000000000000000000000000000000000000000000000000000000007f7f0000404151715151005757575747475757574757575757575757475757575757574757575757574747575757575757475757575757575747575757574757575747575757000000000000000000000000000000000000000000000000000000
+520000000000004041414141414142000000000000000000000000000000007f7f0000505151515151005757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757000000000000000000000000000000000000000000000000000000
+527e7e7e7e7e7e5072515170515152000000000000000000000000000000007f7f0000507251517051005757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757000000000000000000000000000000000000000000000000000000
+520000000000005051515151515151414141414141414142000000000000007f7f0000505171515151005757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757000000000000000000000000000000000000000000000000000000
+520000000000005051715151515151517251515151715170414142000000007f7f0000505151515151005757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757000000000000000000000000000000000000000000000000000000
+520000000000005070515151705171515151705151515151515151414200007f7f0000507051725151005757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757000000000000000000000000000000000000000000000000000000
+5141414141414151515151515151515151515151515151515172515151414141414141515151515151005757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757414141414141414141414141414141414141414141414141414141
+__sfx__
+00050000177211a731217412775132751007010000100001000010000100001000010000100001000010000100001000010000100001000010000100001000010000100001000010000100001000010000100001
+000300000131002310013100260013600156001360012600126000960005600016000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+__music__
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+00 41424344
+
